@@ -257,39 +257,44 @@ class BrainToTextDecoder_Trainer:
         self.model.to(self.device)
 
     def create_optimizer(self):
-        '''
-        Create the optimizer with special param groups 
-
-        Biases and day weights should not be decayed
-
-        Day weights should have a separate learning rate
-        '''
-        bias_params = [p for name, p in self.model.named_parameters() if 'gru.bias' in name or 'out.bias' in name]
+# 1. Separate parameters by type
+        # 'reverse' handles the new backward GRU weights
+        # 'out' handles the new classification head
+        high_lr_params = [p for name, p in self.model.named_parameters() 
+                          if 'reverse' in name or 'out' in name]
+        
+        # 'gru' (without reverse) are the pre-trained forward weights
+        low_lr_params = [p for name, p in self.model.named_parameters() 
+                         if 'gru' in name and 'reverse' not in name and 'bias' not in name]
+        
+        # Day weights and biases (keep existing logic)
+        bias_params = [p for name, p in self.model.named_parameters() if 'bias' in name]
         day_params = [p for name, p in self.model.named_parameters() if 'day_' in name]
-        other_params = [p for name, p in self.model.named_parameters() if 'day_' not in name and 'gru.bias' not in name and 'out.bias' not in name]
 
-        if len(day_params) != 0:
-            param_groups = [
-                    {'params' : bias_params, 'weight_decay' : 0, 'group_type' : 'bias'},
-                    {'params' : day_params, 'lr' : self.args['lr_max_day'], 'weight_decay' : self.args['weight_decay_day'], 'group_type' : 'day_layer'},
-                    {'params' : other_params, 'group_type' : 'other'}
-                ]
-        else: 
-            param_groups = [
-                    {'params' : bias_params, 'weight_decay' : 0, 'group_type' : 'bias'},
-                    {'params' : other_params, 'group_type' : 'other'}
-                ]
+        # 2. Create param groups with differential LRs
+        param_groups = [
+            # NEW layers: Train at full speed
+            {'params': high_lr_params, 'lr': self.args['lr_max'], 'weight_decay': self.args['weight_decay']},
             
+            # OLD layers: Train at 10% speed to preserve knowledge
+            {'params': low_lr_params, 'lr': self.args['lr_max'] * 0.1, 'weight_decay': self.args['weight_decay']},
+            
+            # Biases (no decay)
+            {'params': bias_params, 'weight_decay': 0.0},
+            
+            # Day layers (specific LR)
+            {'params': day_params, 'lr': self.args['lr_max_day'], 'weight_decay': self.args['weight_decay_day']}
+        ]
+
         optim = torch.optim.AdamW(
             param_groups,
-            lr = self.args['lr_max'],
+            lr = self.args['lr_max'], # Default fallback
             betas = (self.args['beta0'], self.args['beta1']),
             eps = self.args['epsilon'],
-            weight_decay = self.args['weight_decay'],
             fused = True
         )
 
-        return optim 
+        return optim
 
     def create_cosine_lr_scheduler(self, optim):
         lr_max = self.args['lr_max']
@@ -368,7 +373,11 @@ class BrainToTextDecoder_Trainer:
         '''
         checkpoint = torch.load(load_path, weights_only = False) # checkpoint is just a dict
 
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        state_dict = checkpoint['model_state_dict']
+    # Remove output head weights (shapes don't match anymore)
+    state_dict = {k: v for k, v in state_dict.items() if 'out' not in k}
+    # strict=False loads the matching forward weights and ignores missing reverse weights
+    self.model.load_state_dict(state_dict, strict=False)
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.learning_rate_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.best_val_PER = checkpoint['val_PER'] # best phoneme error rate
@@ -518,6 +527,9 @@ class BrainToTextDecoder_Trainer:
 
             # Move data to device
             features = batch['input_features'].to(self.device)
+            dorsal_cutoff = 128 
+features[:, :, :dorsal_cutoff] = 0.0
+            
             labels = batch['seq_class_ids'].to(self.device)
             n_time_steps = batch['n_time_steps'].to(self.device)
             phone_seq_lens = batch['phone_seq_lens'].to(self.device)

@@ -68,7 +68,7 @@ class GRUDecoder(nn.Module):
             num_layers = self.n_layers,
             dropout = self.rnn_dropout, 
             batch_first = True, # The first dim of our input is the batch dim
-            bidirectional = False,
+            bidirectional = True,
         )
 
         # Set recurrent units to have orthogonal param init and input layers to have xavier init
@@ -79,7 +79,7 @@ class GRUDecoder(nn.Module):
                 nn.init.xavier_uniform_(param)
 
         # Prediciton head. Weight init to xavier
-        self.out = nn.Linear(self.n_units, self.n_classes)
+        self.out = nn.Linear(self.n_units*2, self.n_classes)
         nn.init.xavier_uniform_(self.out.weight)
 
         # Learnable initial hidden states
