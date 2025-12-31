@@ -53,6 +53,8 @@ class BrainToTextDecoder_Trainer:
         self.train_loader = None 
         self.val_loader = None 
 
+        self.checkpoint_history = []
+
         self.transform_args = self.args['dataset']['data_transforms']
 
         # Create output directory
@@ -636,7 +638,21 @@ features[:, :, :dorsal_cutoff] = 0.0
 
                 # Optionally save this validation checkpoint, regardless of performance
                 if self.args['save_all_val_steps']:
-                    self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/checkpoint_batch_{i}', val_metrics['avg_PER'])
+                    ckpt_path = f'{self.args["checkpoint_dir"]}/checkpoint_batch_{i}'
+                    self.save_model_checkpoint(ckpt_path, val_metrics['avg_PER'], val_metrics['avg_loss'])
+                    
+                    # --- NEW CLEANUP LOGIC ---
+                    self.checkpoint_history.append(ckpt_path)
+                    # Change '3' to however many recent files you want to keep
+                    if len(self.checkpoint_history) > 3: 
+                        oldest_ckpt = self.checkpoint_history.pop(0)
+                        # Try/Except block prevents crashing if file is already gone
+                        try:
+                            if os.path.exists(oldest_ckpt):
+                                os.remove(oldest_ckpt)
+                        except OSError as e:
+                            self.logger.warning(f"Error deleting old checkpoint {oldest_ckpt}: {e}")
+                    # -------------------------
 
                 # Early stopping 
                 if early_stopping and (val_steps_since_improvement >= early_stopping_val_steps):
